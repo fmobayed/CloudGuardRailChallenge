@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  An enterprise-grade SQS guardrail solution for newly created SQS queues.
+  - Python Lambda for checks (encryption, tagging, etc.)
+  - IAM Role with Permission Boundary
+  - EventBridge Rule
+  - Optional SNS Topic for alerts
+  - Control Tower guardrail for DLQ requirement
+
+Parameters:
+  LambdaRuntime:
+    Type: String
+    Default: python3.9
+    Description: Lambda runtime environment
+
+  LambdaMemorySize:
+    Type: Number
+    Default: 256
+    Description: Memory size (MB) for the Lambda function
+
+  PermissionBoundaryArn:
+    Type: String
+    Description: ARN of the Permission Boundary managed policy
+
+  OptionalSNSTopicArn:
+    Type: String
+    Description: (Optional) ARN of an existing SNS topic for alerts
+
+  ControlTowerOUArn:
+    Type: String
+    Description: ARN of the Organizational Unit to apply the guardrail
+
+Resources:
+  ##################################################
+  # 1. IAM Role for Lambda
+  ##################################################
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "SQSGuardrailLambdaRole-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref PermissionBoundaryArn
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  LambdaExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:       
+      PolicyName: LambdaSQSGuardrailPolicy
+      Roles:
+        - !Ref LambdaExecutionRole 
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DescribeVpcEndpoints
+            Effect: Allow
+            Action:
+              - ec2:DescribeVpcEndpoints
+            Resource: "*"
+          - Sid: SQSReadAttributes
+            Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+              - sqs:ListQueueTags
+            Resource: "*"
+          - Sid: SNSPublish
+            Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: "*"    
+
+  ##################################################
+  # 2. Lambda Function
+  ##################################################
+  SQSGuardrailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "SQSGuardrailFunction-${AWS::StackName}"
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: lambda_function.lambda_handler
+      Runtime: !Ref LambdaRuntime
+      MemorySize: !Ref LambdaMemorySize
+      Timeout: 30
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref OptionalSNSTopicArn
+      CodeUri: ./lambda_function
+
+  ##################################################
+  # 3. EventBridge Rule for CreateQueue
+  ##################################################
+  SQSCreateQueueEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "SQSCreateQueueEventRule-${AWS::StackName}"
+      Description: "Triggers the SQSGuardrailFunction on CreateQueue events via CloudTrail"
+      EventPattern:
+        source:
+          - aws.sqs
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - sqs.amazonaws.com
+          eventName:
+            - CreateQueue
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SQSGuardrailFunction.Arn
+          Id: "SQSGuardrailFunctionTarget"
+          RoleArn: !GetAtt EventbridgeTriggerLambdaExecutionRole.Arn
+
+  EventBridgeCreateQueuePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+     Action: "lambda:InvokeFunction"
+     FunctionName: !GetAtt SQSGuardrailFunction.Arn
+     Principal: "events.amazonaws.com"
+     SourceArn: !GetAtt SQSCreateQueueEventRule.Arn
+
+  EventbridgeTriggerLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "EventBridgeTriggerLambdaRole-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+  EventbridgeTriggerLambdaExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:     
+      PolicyName: !Sub "EventbridgeInvokeLambdaPolicy-${AWS::StackName}" 
+      Roles:
+        - !Ref EventbridgeTriggerLambdaExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !GetAtt SQSGuardrailFunction.Arn
+   
+
+  ##################################################
+  # 4. Control Tower Guardrail (SQS must have DLQ)
+  ##################################################
+  SQSDeadLetterQueueRequiredControl:
+    Type: AWS::ControlTower::EnabledControl
+    Properties:
+      # Confirm this is the correct control ARN in your environment.
+      ControlIdentifier: "arn:aws:controltower:us-east-1::control/CT-SQS-DLQ-1"
+      TargetIdentifier: !Ref ControlTowerOUArn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the deployed Lambda function
+    Value: !GetAtt SQSGuardrailFunction.Arn
+
+  LambdaExecutionRoleArn:
+    Description: ARN of the IAM Role for Lambda
+    Value: !GetAtt LambdaExecutionRole.Arn
+
+  ControlTowerEnabledControlId:
+    Description: ID of the enabled control
+    Value: !Ref SQSDeadLetterQueueRequiredControl
