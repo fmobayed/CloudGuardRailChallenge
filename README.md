@@ -11,7 +11,7 @@ Overview
         Verifies new SQS queues have encryption with a customer-managed KMS key, have required tags, and logs/publishes SNS alerts if checks fail.
     IAM Role with a Permission Boundary:
         Restricts the Lambda’s maximum privileges, ensuring tight security in multi-account environments.
-    Optionally add a Control Tower guardrail requiring SQS to have a dead-letter queue in your chosen region. (Commented out in the template, but can be uncommented.)
+    A Control Tower guardrail is added requiring SQS to have a dead-letter queue in your chosen region.
 
 Architecture
 
