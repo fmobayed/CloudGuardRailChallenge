@@ -1,0 +1,84 @@
+name: CI-CD for CloudGuardRailChallenge
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+    # Non-sensitive parameters as environment variables
+      CFN_RUNTIME: ${{ vars.CFN_RUNTIME }}
+      CFN_MEMORY: ${{ vars.CFN_MEMORY }}
+      CFN_S3_BUCKET: ${{ vars.CFN_S3_BUCKET }}
+      CFN_S3_KEY: ${{ vars.CFN_S3_KEY }}
+      CFN_STACK_NAME: ${{ vars.CFN_STACK_NAME }}
+    # Sensitive values:
+      PERMISSION_BOUNDARY_ARN: ${{ secrets.PERMISSION_BOUNDARY_ARN }}
+      CONTROL_TOWER_OU_ARN: ${{ secrets.CONTROL_TOWER_OU_ARN }}
+      OPTIONAL_SNS_TOPIC_ARN: ${{ secrets.OPTIONAL_SNS_TOPIC_ARN }}
+
+    permissions:
+      # Required for GitHub to issue an OIDC token
+      id-token: write
+      # Required for checking out the repo
+      contents: read
+
+    steps:
+      # 1) Check out the repo
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      # 2) Configure AWS Credentials
+      #    Here we're using OIDC by referencing your role-to-assume, etc.
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: list files
+        run: |
+          echo "Working directory: $(pwd)"
+          ls -la
+
+      # 3) Validate the CloudFormation template
+      - name: Validate CloudFormation Template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://template.yaml
+
+      # 4) Zip the Lambda function code
+      - name: Zip Lambda code
+        run: |
+          zip -r lambda_function.zip lambda_function
+
+      # 5) Package the CloudFormation stack
+      #    This will upload lambda_function.zip to S3 and rewrite template.yaml -> packaged-template.yaml
+      - name: Package CloudFormation
+        run: |
+          aws cloudformation package \
+            --template-file template.yaml \
+            --s3-bucket $CFN_S3_BUCKET \
+            --output-template-file packaged-template.yaml
+
+      # 6) Deploy the packaged template
+      #    Sensitive parameters come from GitHub Secrets. Non-sensitive from env.
+      - name: Deploy CloudFormation
+        run: |
+          aws cloudformation deploy \
+            --template-file packaged-template.yaml \
+            --stack-name $CFN_STACK_NAME \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              LambdaRuntime=$CFN_RUNTIME \
+              LambdaMemorySize=$CFN_MEMORY \
+              PermissionBoundaryArn="$PERMISSION_BOUNDARY_ARN" \
+              OptionalSNSTopicArn="$OPTIONAL_SNS_TOPIC_ARN" \
+              ControlTowerOUArn="$CONTROL_TOWER_OU_ARN" \
+              LambdaCodeS3Bucket="$CFN_S3_BUCKET" \
+              LambdaCodeS3Key="$CFN_S3_KEY"
